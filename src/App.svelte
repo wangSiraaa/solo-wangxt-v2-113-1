@@ -1,27 +1,38 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { get } from 'svelte/store';
   import CanvasEditor from './components/CanvasEditor.svelte';
   import GroupPanel from './components/GroupPanel.svelte';
   import Inspector from './components/Inspector.svelte';
+  import RevisionPanel from './components/RevisionPanel.svelte';
   import SeamCheck from './components/SeamCheck.svelte';
   import {
     editor,
     markSaved,
     redo,
     selectObject,
-    setProject,
     setTool,
     undo,
     updateProject,
     renderOptions
   } from './lib/stores';
-  import { deleteProject, listProjects, saveProject } from './lib/db';
+  import {
+    bootFromStorage,
+    openProject,
+    refreshProjectList,
+    removeProject,
+    revisionState,
+    savedProjects,
+    saveWorkingCopyNow,
+    shortRevisionId,
+    startNewProject
+  } from './lib/controller';
+  import { isStaleSave, type SaveContext } from './lib/revisions';
   import { defaultProject, glideSample, p6mSample, rotationSample } from './lib/samples';
-  import type { Project, Tool } from './types';
+  import type { Tool } from './types';
 
-  let savedProjects: Project[] = [];
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
-  let activeTab: 'group' | 'inspector' | 'seam' | 'projects' = 'group';
+  let activeTab: 'group' | 'inspector' | 'seam' | 'revisions' | 'projects' = 'group';
 
   const tools: Array<{ id: Tool; label: string; title: string }> = [
     { id: 'select', label: '选择/拖动', title: '选择实例并拖动；拖动映射回原始路径' },
@@ -31,37 +42,63 @@
     { id: 'ellipse', label: '椭圆', title: '创建椭圆贝塞尔路径' }
   ];
 
+  function currentContext(): SaveContext {
+    const state = get(editor);
+    return { projectId: state.project.id, generation: state.generation };
+  }
+
+  /**
+   * Debounced autosave. The scheduled write carries the working-copy
+   * generation captured now; after loading another project or switching
+   * revisions the generation changes and the late timer is dropped instead of
+   * writing stale content into the new context.
+   */
   function scheduleSave() {
     if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(async () => {
-      await saveProject($editor.project);
-      markSaved();
-      await refreshProjects();
+    const context = currentContext();
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      void flushAutosave(context);
     }, 700);
   }
 
-  async function refreshProjects() {
-    savedProjects = await listProjects();
+  async function flushAutosave(context: SaveContext) {
+    if (isStaleSave(context, currentContext())) return;
+    await saveWorkingCopyNow();
+    if (isStaleSave(context, currentContext())) return;
+    markSaved();
+  }
+
+  /** Persist the current context immediately (before any context switch). */
+  async function flushPendingSave() {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    const context = currentContext();
+    await saveWorkingCopyNow();
+    if (!isStaleSave(context, currentContext())) markSaved();
   }
 
   async function saveNow() {
-    await saveProject($editor.project);
-    markSaved();
-    await refreshProjects();
+    await flushPendingSave();
   }
 
-  function loadProject(project: Project) {
-    setProject(project);
-    scheduleSave();
+  async function openSaved(id: string) {
+    await flushPendingSave();
+    await openProject(id);
   }
 
-  async function removeProject(project: Project) {
-    await deleteProject(project.id);
-    await refreshProjects();
+  async function deleteSaved(id: string) {
+    await removeProject(id);
   }
 
   function newProject() {
-    setProject(defaultProject());
+    startNewProject(defaultProject());
+  }
+
+  function loadSample(sample: ReturnType<typeof defaultProject>) {
+    startNewProject(sample);
   }
 
   function keyboard(event: KeyboardEvent) {
@@ -83,7 +120,8 @@
   const unsubscribe = editor.subscribe(scheduleSave);
 
   onMount(async () => {
-    await refreshProjects();
+    await refreshProjectList();
+    await bootFromStorage();
     window.addEventListener('keydown', keyboard);
   });
 
@@ -106,6 +144,9 @@
         on:change={(e) =>
           updateProject((project) => ({ ...project, name: e.currentTarget.value }))}
       />
+      <span class="branch-chip" title="当前工作分支 / 基点修订">
+        {$revisionState.branch} · {shortRevisionId($revisionState.baseRevisionId)}
+      </span>
       <span class:ok={$editor.saved}>{$editor.saved ? '已保存' : '待保存'}</span>
       <button on:click={saveNow}>保存</button>
     </div>
@@ -124,9 +165,9 @@
       <button disabled={!$editor.canRedo} on:click={redo}>重做</button>
     </div>
     <div class="samples">
-      <button on:click={() => setProject(glideSample())}>滑移样例</button>
-      <button on:click={() => setProject(rotationSample())}>旋转样例</button>
-      <button on:click={() => setProject(p6mSample())}>完整样例</button>
+      <button on:click={() => loadSample(glideSample())}>滑移样例</button>
+      <button on:click={() => loadSample(rotationSample())}>旋转样例</button>
+      <button on:click={() => loadSample(p6mSample())}>完整样例</button>
       <button on:click={newProject}>重置</button>
     </div>
     <label class="toggle"><input type="checkbox" bind:checked={$renderOptions.showDomain} />基本域</label>
@@ -140,6 +181,7 @@
         <button class:active={activeTab === 'group'} on:click={() => (activeTab = 'group')}>群/矩阵</button>
         <button class:active={activeTab === 'inspector'} on:click={() => (activeTab = 'inspector')}>对象</button>
         <button class:active={activeTab === 'seam'} on:click={() => (activeTab = 'seam')}>接缝/导出</button>
+        <button class:active={activeTab === 'revisions'} on:click={() => (activeTab = 'revisions')}>修订</button>
         <button class:active={activeTab === 'projects'} on:click={() => (activeTab = 'projects')}>工程库</button>
       </nav>
       <div class="panel-scroll">
@@ -149,22 +191,26 @@
           <Inspector />
         {:else if activeTab === 'seam'}
           <SeamCheck />
+        {:else if activeTab === 'revisions'}
+          <RevisionPanel />
         {:else}
           <section class="projects">
             <h3>IndexedDB 工程</h3>
-            <button on:click={refreshProjects}>刷新</button>
-            {#if savedProjects.length === 0}
+            <button on:click={refreshProjectList}>刷新</button>
+            {#if $savedProjects.length === 0}
               <p>暂无已保存工程。编辑会自动保存。</p>
             {:else}
               <ul>
-                {#each savedProjects as project (project.id)}
+                {#each $savedProjects as project (project.id)}
                   <li>
                     <div>
                       <strong>{project.name}</strong>
-                      <small>{project.group} · {new Date(project.updatedAt).toLocaleString()}</small>
+                      <small>
+                        {project.currentBranch} · {new Date(project.updatedAt).toLocaleString()}
+                      </small>
                     </div>
-                    <button on:click={() => loadProject(project)}>打开</button>
-                    <button class="danger" on:click={() => removeProject(project)}>删除</button>
+                    <button on:click={() => openSaved(project.id)}>打开</button>
+                    <button class="danger" on:click={() => deleteSaved(project.id)}>删除</button>
                   </li>
                 {/each}
               </ul>
@@ -258,6 +304,15 @@
   .project-meta input {
     width: 220px;
   }
+  .branch-chip {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 11px;
+    color: #cbd5e1;
+    white-space: nowrap;
+  }
   .ok {
     color: #86efac;
   }
@@ -302,7 +357,7 @@
   }
   nav {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     border-bottom: 1px solid #e2e8f0;
   }
   nav button {

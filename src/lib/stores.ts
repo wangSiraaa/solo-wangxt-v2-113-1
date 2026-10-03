@@ -14,6 +14,12 @@ export interface EditorState {
   canUndo: boolean;
   canRedo: boolean;
   saved: boolean;
+  /**
+   * Working-copy generation. Bumped on every context switch (open project,
+   * restore revision, load sample); autosave timers capture it and stale
+   * timers are dropped so late writes never land in a new context.
+   */
+  generation: number;
 }
 
 interface HistoryEntry {
@@ -30,7 +36,8 @@ const editorStore = writable<EditorState>({
   tool: 'select',
   canUndo: false,
   canRedo: false,
-  saved: false
+  saved: false,
+  generation: 0
 });
 
 const undoStack: HistoryEntry[] = [];
@@ -99,15 +106,33 @@ export function setProject(project: Project, clearHistory = true) {
     undoStack.length = 0;
     redoStack.length = 0;
   }
-  editorStore.set({
+  editorStore.update((state) => ({
     project: structuredClone(project),
     selectedId: project.objects[0]?.id ?? null,
     selectedInstance: null,
     tool: 'select',
-    canUndo: false,
-    canRedo: false,
-    saved: false
-  });
+    canUndo: clearHistory ? false : state.canUndo,
+    canRedo: clearHistory ? false : state.canRedo,
+    saved: false,
+    generation: state.generation + 1
+  }));
+}
+
+/**
+ * Materialize a revision into the canvas as an undoable action: the previous
+ * state is pushed onto the undo stack so undo/redo semantics survive a
+ * restore. Bumps the working-copy generation like any context switch.
+ */
+export function restoreProject(project: Project) {
+  pushHistory();
+  editorStore.update((state) => ({
+    ...state,
+    project: structuredClone(project),
+    selectedId: project.objects[0]?.id ?? null,
+    selectedInstance: null,
+    saved: false,
+    generation: state.generation + 1
+  }));
 }
 
 export function selectObject(id: string | null, instance: string | null = null) {
