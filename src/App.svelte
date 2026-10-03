@@ -1,27 +1,26 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
   import CanvasEditor from './components/CanvasEditor.svelte';
   import GroupPanel from './components/GroupPanel.svelte';
   import Inspector from './components/Inspector.svelte';
   import SeamCheck from './components/SeamCheck.svelte';
+  import TimelinePanel from './components/TimelinePanel.svelte';
+  import { editor, redo, selectObject, setTool, undo, updateProject, renderOptions } from './lib/stores';
   import {
-    editor,
-    markSaved,
-    redo,
-    selectObject,
-    setProject,
-    setTool,
-    undo,
-    updateProject,
-    renderOptions
-  } from './lib/stores';
-  import { deleteProject, listProjects, saveProject } from './lib/db';
+    clearWorkspaceError,
+    initWorkspace,
+    openProject,
+    removeProject,
+    saveNow,
+    startNewProject,
+    workspace
+  } from './lib/workspace';
+  import { listProjects } from './lib/db';
   import { defaultProject, glideSample, p6mSample, rotationSample } from './lib/samples';
-  import type { Project, Tool } from './types';
+  import type { ProjectMeta, Tool } from './types';
 
-  let savedProjects: Project[] = [];
-  let saveTimer: ReturnType<typeof setTimeout> | null = null;
-  let activeTab: 'group' | 'inspector' | 'seam' | 'projects' = 'group';
+  let savedProjects: ProjectMeta[] = [];
+  let activeTab: 'group' | 'inspector' | 'seam' | 'timeline' | 'projects' = 'group';
 
   const tools: Array<{ id: Tool; label: string; title: string }> = [
     { id: 'select', label: '选择/拖动', title: '选择实例并拖动；拖动映射回原始路径' },
@@ -31,37 +30,23 @@
     { id: 'ellipse', label: '椭圆', title: '创建椭圆贝塞尔路径' }
   ];
 
-  function scheduleSave() {
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(async () => {
-      await saveProject($editor.project);
-      markSaved();
-      await refreshProjects();
-    }, 700);
-  }
-
   async function refreshProjects() {
     savedProjects = await listProjects();
   }
 
-  async function saveNow() {
-    await saveProject($editor.project);
-    markSaved();
+  async function openSaved(meta: ProjectMeta) {
+    await openProject(meta.id);
     await refreshProjects();
   }
 
-  function loadProject(project: Project) {
-    setProject(project);
-    scheduleSave();
-  }
-
-  async function removeProject(project: Project) {
-    await deleteProject(project.id);
+  async function removeSaved(meta: ProjectMeta) {
+    await removeProject(meta.id);
     await refreshProjects();
   }
 
-  function newProject() {
-    setProject(defaultProject());
+  async function startFresh(project: Parameters<typeof startNewProject>[0]) {
+    await startNewProject(project);
+    await refreshProjects();
   }
 
   function keyboard(event: KeyboardEvent) {
@@ -76,21 +61,17 @@
       redo();
     } else if ((event.ctrlKey || event.metaKey) && key === 's') {
       event.preventDefault();
-      void saveNow();
+      void saveNow().then(refreshProjects);
     }
   }
 
-  const unsubscribe = editor.subscribe(scheduleSave);
-
-  onMount(async () => {
-    await refreshProjects();
+  onMount(() => {
+    void (async () => {
+      await initWorkspace();
+      await refreshProjects();
+    })();
     window.addEventListener('keydown', keyboard);
-  });
-
-  onDestroy(() => {
-    unsubscribe();
-    window.removeEventListener('keydown', keyboard);
-    if (saveTimer) clearTimeout(saveTimer);
+    return () => window.removeEventListener('keydown', keyboard);
   });
 </script>
 
@@ -98,7 +79,7 @@
   <header>
     <div>
       <h1>墙纸群无缝图案编辑器</h1>
-      <p>矩阵复合生成平移、旋转、反射与滑移；IndexedDB 本地保存，无服务端。</p>
+      <p>矩阵复合生成平移、旋转、反射与滑移；IndexedDB 本地保存修订与分支，无服务端。</p>
     </div>
     <div class="project-meta">
       <input
@@ -106,10 +87,18 @@
         on:change={(e) =>
           updateProject((project) => ({ ...project, name: e.currentTarget.value }))}
       />
+      <span class="branch" title="当前工作副本所在分支">分支 {$workspace.branch}</span>
       <span class:ok={$editor.saved}>{$editor.saved ? '已保存' : '待保存'}</span>
-      <button on:click={saveNow}>保存</button>
+      <button on:click={() => void saveNow().then(refreshProjects)}>保存</button>
     </div>
   </header>
+
+  {#if $workspace.error}
+    <div class="error-banner">
+      <span>{$workspace.error}</span>
+      <button on:click={clearWorkspaceError}>知道了</button>
+    </div>
+  {/if}
 
   <section class="toolbar">
     <div class="tools">
@@ -124,10 +113,10 @@
       <button disabled={!$editor.canRedo} on:click={redo}>重做</button>
     </div>
     <div class="samples">
-      <button on:click={() => setProject(glideSample())}>滑移样例</button>
-      <button on:click={() => setProject(rotationSample())}>旋转样例</button>
-      <button on:click={() => setProject(p6mSample())}>完整样例</button>
-      <button on:click={newProject}>重置</button>
+      <button on:click={() => startFresh(glideSample())}>滑移样例</button>
+      <button on:click={() => startFresh(rotationSample())}>旋转样例</button>
+      <button on:click={() => startFresh(p6mSample())}>完整样例</button>
+      <button on:click={() => startFresh(defaultProject())}>重置</button>
     </div>
     <label class="toggle"><input type="checkbox" bind:checked={$renderOptions.showDomain} />基本域</label>
     <label class="toggle"><input type="checkbox" bind:checked={$renderOptions.showGrid} />晶格</label>
@@ -140,6 +129,7 @@
         <button class:active={activeTab === 'group'} on:click={() => (activeTab = 'group')}>群/矩阵</button>
         <button class:active={activeTab === 'inspector'} on:click={() => (activeTab = 'inspector')}>对象</button>
         <button class:active={activeTab === 'seam'} on:click={() => (activeTab = 'seam')}>接缝/导出</button>
+        <button class:active={activeTab === 'timeline'} on:click={() => (activeTab = 'timeline')}>修订/分支</button>
         <button class:active={activeTab === 'projects'} on:click={() => (activeTab = 'projects')}>工程库</button>
       </nav>
       <div class="panel-scroll">
@@ -149,6 +139,8 @@
           <Inspector />
         {:else if activeTab === 'seam'}
           <SeamCheck />
+        {:else if activeTab === 'timeline'}
+          <TimelinePanel />
         {:else}
           <section class="projects">
             <h3>IndexedDB 工程</h3>
@@ -158,13 +150,13 @@
             {:else}
               <ul>
                 {#each savedProjects as project (project.id)}
-                  <li>
+                  <li class:current={project.id === $workspace.projectId}>
                     <div>
                       <strong>{project.name}</strong>
-                      <small>{project.group} · {new Date(project.updatedAt).toLocaleString()}</small>
+                      <small>{new Date(project.updatedAt).toLocaleString()}</small>
                     </div>
-                    <button on:click={() => loadProject(project)}>打开</button>
-                    <button class="danger" on:click={() => removeProject(project)}>删除</button>
+                    <button on:click={() => openSaved(project)}>打开</button>
+                    <button class="danger" on:click={() => removeSaved(project)}>删除</button>
                   </li>
                 {/each}
               </ul>
@@ -230,7 +222,7 @@
   main {
     height: 100vh;
     display: grid;
-    grid-template-rows: auto auto 1fr;
+    grid-template-rows: auto auto auto 1fr;
   }
   header {
     display: flex;
@@ -258,8 +250,27 @@
   .project-meta input {
     width: 220px;
   }
+  .branch {
+    padding: 2px 10px;
+    border-radius: 999px;
+    background: #1e293b;
+    color: #bfdbfe;
+    font-size: 12px;
+    white-space: nowrap;
+  }
   .ok {
     color: #86efac;
+  }
+  .error-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 16px;
+    background: #fef2f2;
+    color: #991b1b;
+    border-bottom: 1px solid #fecaca;
+    font-size: 13px;
   }
   .toolbar {
     display: flex;
@@ -302,7 +313,7 @@
   }
   nav {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     border-bottom: 1px solid #e2e8f0;
   }
   nav button {
@@ -335,6 +346,10 @@
     padding: 7px;
     border: 1px solid #e2e8f0;
     border-radius: 8px;
+  }
+  .projects li.current {
+    border-color: #1d4ed8;
+    background: #eff6ff;
   }
   .projects small {
     display: block;

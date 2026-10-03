@@ -110,6 +110,22 @@ export function setProject(project: Project, clearHistory = true) {
   });
 }
 
+/**
+ * Replace the document as an undoable action: the previous state is pushed onto the
+ * undo stack so restoring a checkpoint never breaks undo/redo semantics, and object
+ * IDs in history entries stay valid because revision payloads preserve them.
+ */
+export function adoptProject(project: Project) {
+  pushHistory();
+  editorStore.update((state) => ({
+    ...state,
+    project: structuredClone(project),
+    selectedId: project.objects[0]?.id ?? null,
+    selectedInstance: null,
+    saved: false
+  }));
+}
+
 export function selectObject(id: string | null, instance: string | null = null) {
   editorStore.update((state) => ({ ...state, selectedId: id, selectedInstance: instance }));
 }

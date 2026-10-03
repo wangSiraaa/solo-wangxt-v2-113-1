@@ -48,6 +48,44 @@ export interface Project {
   updatedAt: number;
 }
 
+/** Revision payload: the complete document snapshot frozen into a checkpoint. */
+export interface RevisionPayload {
+  group: GroupId;
+  cellWidth: number;
+  cellHeight: number;
+  objects: PatternObject[];
+}
+
+/** Immutable checkpoint. Once written it is never modified or overwritten. */
+export interface Revision {
+  id: string;
+  projectId: string;
+  parentId: string | null;
+  branch: string;
+  label: string;
+  createdAt: number;
+  format: number;
+  payload: RevisionPayload;
+}
+
+/** Mutable working copy: exactly one per project, descended from a base revision. */
+export interface WorkingCopy {
+  projectId: string;
+  branch: string;
+  baseRevisionId: string | null;
+  generation: number;
+  payload: RevisionPayload;
+  updatedAt: number;
+}
+
+export interface ProjectMeta {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  branchCounter: number;
+}
+
 export type Tool = 'select' | 'node' | 'pen' | 'rectangle' | 'ellipse';
 
 export interface Camera {
